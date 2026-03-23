@@ -38,31 +38,12 @@ def analyze_face():
 
 @app.route('/analyze-text', methods=['POST'])
 def analyze_text():
-    try:
-        data = request.json
-        user_input = data.get('text', '')
+    data = request.json
+    user_input = data.get('text', '')
 
-        # 🔒 HARD FILTER (this is the fix)
-        mood_keywords = [
-            "sad","happy","bored","tired","lonely",
-            "stress","anxious","scrolling","reels",
-            "nothing to do","feeling low"
-        ]
+    result = analyze_mood_text(user_input)
 
-        if not any(word in user_input.lower() for word in mood_keywords):
-            return jsonify({
-                "emotion": None,
-                "response": "I only help with mood and activity suggestions.",
-                "activities": [],
-                "message": "Tell me how you're feeling 😊"
-            })
-
-        # ✅ If valid → continue your existing logic
-        result = analyze_mood_text(user_input)
-        return jsonify(result)
-
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
+    return jsonify(result)
+    
 if __name__ == '__main__':
     app.run(debug=False, port=5000)

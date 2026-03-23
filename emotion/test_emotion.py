@@ -13,41 +13,41 @@ from transformers import AutoImageProcessor, AutoModelForImageClassification
 face_model = None
 processor = None
 emotion_model = None
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # -------------------------------
-# 🔹 Load Models (called from Flask)
+# 🔹 Load Models
 # -------------------------------
 def load_models():
     global face_model, processor, emotion_model
 
     if face_model is not None:
-        return  # already loaded
+        return
 
-    print("Loading face detection model...")
+    print("🔄 Loading face detection model...")
     model_path = hf_hub_download(
         repo_id="arnabdhar/YOLOv8-Face-Detection",
         filename="model.pt"
     )
     face_model = YOLO(model_path)
 
-    print("Loading emotion model...")
+    print("🔄 Loading emotion model...")
     processor = AutoImageProcessor.from_pretrained(
         "dima806/face_emotions_image_detection"
     )
     emotion_model = AutoModelForImageClassification.from_pretrained(
         "dima806/face_emotions_image_detection"
-    )
+    ).to(device)
 
-    print("✅ Models loaded successfully!")
+    print(f"✅ Models loaded on {device}!")
 
 
 # -------------------------------
-# 🔹 Convert Base64 → OpenCV Image
+# 🔹 Base64 → Image
 # -------------------------------
 def base64_to_image(base64_str):
     try:
-        # Remove metadata like "data:image/jpeg;base64,..."
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
 
@@ -56,32 +56,44 @@ def base64_to_image(base64_str):
         image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         return image
-    except Exception as e:
+    except Exception:
         return None
 
 
 # -------------------------------
-# 🔹 Emotion Prediction
+# 🔹 Emotion Prediction (MULTI)
 # -------------------------------
 def get_emotion(face_crop):
     pil_face = Image.fromarray(cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB))
 
-    inputs = processor(images=pil_face, return_tensors="pt")
+    inputs = processor(images=pil_face, return_tensors="pt").to(device)
 
     with torch.no_grad():
         outputs = emotion_model(**inputs)
 
-    predicted_class = outputs.logits.argmax(-1).item()
-    emotion = emotion_model.config.id2label[predicted_class]
+    probs = torch.softmax(outputs.logits, dim=-1)[0]
 
-    probs = torch.softmax(outputs.logits, dim=-1)
-    confidence = probs[0][predicted_class].item()
+    topk = torch.topk(probs, k=2)
 
-    return emotion, confidence
+    results = []
+    for idx, score in zip(topk.indices, topk.values):
+        if score.item() > 0.3:
+            results.append({
+                "emotion": emotion_model.config.id2label[idx.item()],
+                "confidence": round(score.item(), 3)
+            })
+
+    if not results:
+        results.append({
+            "emotion": emotion_model.config.id2label[topk.indices[0].item()],
+            "confidence": round(topk.values[0].item(), 3)
+        })
+
+    return results
 
 
 # -------------------------------
-# 🔹 Main Function (Used by Flask)
+# 🔹 Main Function
 # -------------------------------
 def analyze_frame_base64(base64_image):
     try:
@@ -90,40 +102,40 @@ def analyze_frame_base64(base64_image):
         if frame is None:
             return {"error": "Invalid image"}
 
-        # Convert to PIL for YOLO
         pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-        # Face detection
         output = face_model(pil_image, verbose=False)
         detections = Detections.from_ultralytics(output[0])
 
         if len(detections.xyxy) == 0:
-            return {
-                "error": "No face detected"
-            }
+            return {"error": "No face detected"}
 
         results = []
+        h, w, _ = frame.shape
 
         for bbox in detections.xyxy:
-            x1, y1, x2, y2 = map(int, bbox)
+            pad = 20
+
+            x1 = max(0, int(bbox[0]) - pad)
+            y1 = max(0, int(bbox[1]) - pad)
+            x2 = min(w, int(bbox[2]) + pad)
+            y2 = min(h, int(bbox[3]) + pad)
 
             face_crop = frame[y1:y2, x1:x2]
 
             if face_crop.size == 0:
                 continue
 
-            emotion, confidence = get_emotion(face_crop)
+            emotions = get_emotion(face_crop)
 
             results.append({
-                "emotion": emotion,
-                "confidence": round(confidence, 3)
+                "emotions": emotions
             })
 
-        # Return dominant (first face)
         if results:
             return {
-                "dominant_emotion": results[0]["emotion"],
-"confidence": float(results[0].get("confidence", 0)),
+                "dominant_emotion": results[0]["emotions"][0]["emotion"],
+                "confidence": float(results[0]["emotions"][0]["confidence"]),
                 "all_faces": results
             }
 
